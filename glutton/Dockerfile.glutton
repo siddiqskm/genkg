@@ -1,0 +1,16 @@
+# Use Flink as the base image
+FROM flink:latest
+
+# Set Base Directory
+ARG BASE_DIR=.
+RUN echo "BASE_DIR is set to: $BASE_DIR"
+
+# Copy the JAR file
+COPY ${BASE_DIR}/target/glutton-1.0-SNAPSHOT.jar /opt/flink/usrlib/glutton.jar
+
+# Copy the startup script
+COPY ${BASE_DIR}/start_glutton.sh /start_glutton.sh
+RUN chmod +x /start_glutton.sh
+
+# Set the entrypoint
+ENTRYPOINT ["/start_glutton.sh"]

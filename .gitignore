@@ -169,3 +169,16 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+
+# Project specific
+test_data*
+clusterID/
+glutton/output/
+glutton/target/
+glutton/data/
+.vscode/
+.codegenie/
+logs/
+notebooks/
+flink/

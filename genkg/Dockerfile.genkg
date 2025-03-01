@@ -1,0 +1,63 @@
+# Use Python 3.9 slim image as base
+FROM python:3.9-slim
+
+# Set Base Directory
+ARG BASE_DIR=.
+RUN echo "BASE_DIR is set to: $BASE_DIR"
+
+# Set working directory
+WORKDIR /app
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    POETRY_VERSION=1.7.1 \
+    POETRY_HOME="/opt/poetry" \
+    POETRY_VIRTUALENVS_CREATE=false \
+    PYTHONPATH="/app:/app/genkg"
+
+# Add Poetry to PATH
+ENV PATH="$POETRY_HOME/bin:$PATH"
+
+# Install system dependencies and Poetry
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        netcat-openbsd \
+    && curl -sSL https://install.python-poetry.org | python3 - \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create directory structure
+RUN mkdir -p /app/genkg/app
+RUN touch /app/genkg/__init__.py
+
+# Copy entire project
+COPY ${BASE_DIR}/app /app/genkg/app/
+
+# Copy poetry related files
+COPY ${BASE_DIR}/pyproject.toml ${BASE_DIR}/poetry.lock* /app/
+
+# Create a health check script
+COPY ${BASE_DIR}/scripts/wait_for_services.sh /app/wait_for_services.sh
+RUN chmod +x /app/wait_for_services.sh
+
+# Install dependencies
+ARG DEV=false
+RUN if [ "$DEV" = "true" ]; then \
+    poetry install --no-interaction --no-ansi || (echo "Poetry install failed" && exit 1); \
+    else \
+    poetry install --no-interaction --no-ansi --only main || (echo "Poetry install failed" && exit 1); \
+    fi
+
+# Create logs directory
+RUN mkdir -p /app/genkg/app/logs
+
+# Expose port
+EXPOSE 8000
+
+# Debugging: verify directory structure and Python path
+RUN pwd && ls -la && python -c "import sys; print(sys.path)"
+
+# Run the application
+CMD ["/bin/sh", "-c", "/app/wait_for_services.sh && poetry run uvicorn genkg.app.main:app --reload --host 0.0.0.0 --port 8000"]

@@ -1,0 +1,225 @@
+services:
+  kafka-gen:
+    image: confluentinc/cp-kafka:7.3.3
+    hostname: kafka-gen
+    container_name: kafka-gen
+    volumes:
+      - ./kscripts/create_cluster_id.sh:/tmp/create_cluster_id.sh
+      - ./clusterID:/tmp/clusterID
+    command: "bash -c '/tmp/create_cluster_id.sh'"
+  kafka1:
+    image: confluentinc/cp-kafka:7.3.3
+    hostname: kafka1
+    container_name: kafka1
+    ports:
+      - "39092:39092"
+    environment:
+      KAFKA_LISTENERS: BROKER://kafka1:19092,EXTERNAL://kafka1:39092,CONTROLLER://kafka1:9093
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka1:19092,EXTERNAL://kafka1:39092
+      KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,BROKER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_PROCESS_ROLES: 'controller,broker'
+      KAFKA_NODE_ID: 1
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka1:9093,2@kafka2:9093,3@kafka3:9093'
+      KAFKA_METADATA_LOG_SEGMENT_MS: 15000
+      KAFKA_METADATA_MAX_RETENTION_MS: 1200000
+      KAFKA_METADATA_LOG_MAX_RECORD_BYTES_BETWEEN_SNAPSHOTS: 2800
+      KAFKA_LOG_DIRS: '/var/lib/kafka/data'
+    volumes:
+      - kafka1-data:/var/lib/kafka/data
+      - ./kscripts/update_run.sh:/tmp/update_run.sh
+      - ./clusterID:/tmp/clusterID
+    command: "bash -c '/tmp/update_run.sh && /etc/confluent/docker/run'"
+    networks:
+      - genkg_network
+  kafka2:
+    image: confluentinc/cp-kafka:7.3.3
+    hostname: kafka2
+    container_name: kafka2
+    ports:
+      - "39093:39093"
+    environment:
+      KAFKA_LISTENERS: BROKER://kafka2:19093,EXTERNAL://kafka2:39093,CONTROLLER://kafka2:9093
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka2:19093,EXTERNAL://kafka2:39093
+      KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,BROKER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_PROCESS_ROLES: 'controller,broker'
+      KAFKA_NODE_ID: 2
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka1:9093,2@kafka2:9093,3@kafka3:9093'
+      KAFKA_METADATA_LOG_SEGMENT_MS: 15000
+      KAFKA_METADATA_MAX_RETENTION_MS: 1200000
+      KAFKA_METADATA_LOG_MAX_RECORD_BYTES_BETWEEN_SNAPSHOTS: 2800
+      KAFKA_LOG_DIRS: '/var/lib/kafka/data'
+    volumes:
+      - kafka2-data:/var/lib/kafka/data
+      - ./kscripts/update_run.sh:/tmp/update_run.sh
+      - ./clusterID:/tmp/clusterID
+    command: "bash -c '/tmp/update_run.sh && /etc/confluent/docker/run'"
+    networks:
+      - genkg_network
+  kafka3:
+    image: confluentinc/cp-kafka:7.3.3
+    hostname: kafka3
+    container_name: kafka3
+    ports:
+      - "39094:39094"
+    environment:
+      KAFKA_LISTENERS: BROKER://kafka3:19094,EXTERNAL://kafka3:39094,CONTROLLER://kafka3:9093
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka3:19094,EXTERNAL://kafka3:39094
+      KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,BROKER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_PROCESS_ROLES: 'controller,broker'
+      KAFKA_NODE_ID: 3
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka1:9093,2@kafka2:9093,3@kafka3:9093'
+      KAFKA_METADATA_LOG_SEGMENT_MS: 15000
+      KAFKA_METADATA_MAX_RETENTION_MS: 1200000
+      KAFKA_METADATA_LOG_MAX_RECORD_BYTES_BETWEEN_SNAPSHOTS: 2800
+      KAFKA_LOG_DIRS: '/var/lib/kafka/data'
+    volumes:
+      - kafka3-data:/var/lib/kafka/data
+      - ./kscripts/update_run.sh:/tmp/update_run.sh
+      - ./clusterID:/tmp/clusterID
+    command: "bash -c '/tmp/update_run.sh && /etc/confluent/docker/run'"
+    networks:
+      - genkg_network
+  kafka-rest:
+    image: confluentinc/cp-kafka-rest:7.3.3
+    hostname: kafka-rest
+    container_name: kafka-rest
+    ports:
+      - "8082:8082"
+    environment:
+      KAFKA_REST_BOOTSTRAP_SERVERS: 'kafka1:19092,kafka2:19093,kafka3:19094'
+      KAFKA_REST_LISTENERS: 'http://0.0.0.0:8082'
+      KAFKA_REST_HOST_NAME: kafka-rest
+      KAFKA_REST_CONSUMER_REQUEST_TIMEOUT_MS: 30000
+      KAFKA_REST_PRODUCER_ACKS: 'all'
+    depends_on:
+      - kafka1
+      - kafka2
+      - kafka3
+    networks:
+      - genkg_network
+  orientdb:
+    image: orientdb:latest
+    ports:
+      - "2424:2424"
+      - "2480:2480"
+    container_name: orientdb
+    environment:
+      - ORIENTDB_ROOT_PASSWORD=root
+    volumes:
+      - orientdb_data:/orientdb/databases
+    networks:
+      - genkg_network
+  genkg:
+    build: 
+      context: genkg
+      dockerfile: Dockerfile.genkg
+      args:
+        DEV: "true"
+        BASE_DIR: "."
+    ports:
+      - "8000:8000"
+    container_name: genkg
+    environment:
+      - APP_NAME=genkg
+      - DEBUG=True
+      - API_V1_STR=/api/v1
+      - ORIENTDB_URL=http://orientdb:2480
+      - ORIENTDB_DB=genkg
+      - ORIENTDB_USER=root
+      - ORIENTDB_PASSWORD=root
+      - KAFKA_BOOTSTRAP_SERVERS=kafka1:19092,kafka2:19093,kafka3:19094
+      - KAFKA_TOPIC_INGESTION=kg-ingestion
+      - LOG_LEVEL=DEBUG
+      - LOG_FILE_PATH=/var/log/genkg/app.log
+    volumes:
+      - ./genkg/app:/app/genkg/app
+      - ./logs:/var/log/genkg
+    depends_on:
+      - orientdb
+      - kafka1
+      - kafka2
+      - kafka3
+    networks:
+      - genkg_network
+  jobmanager:
+    image: flink:latest
+    ports:
+      - "8081:8081"
+    container_name: jobmanager
+    command: jobmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=jobmanager
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        state.backend: filesystem
+        heartbeat.timeout: 18000000
+    volumes:
+      - ./test_data:/opt/flink/test_data
+    networks:
+      - genkg_network
+  taskmanager:
+    image: flink:latest
+    depends_on:
+      - jobmanager
+    command: taskmanager
+    container_name: taskmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=jobmanager
+      - |
+        FLINK_PROPERTIES=
+        taskmanager.numberOfTaskSlots: 4
+        state.backend: filesystem
+        heartbeat.timeout: 18000000
+        taskmanager.memory.process.size: 2048m
+    volumes:
+      - ./test_data:/opt/flink/test_data
+    networks:
+      - genkg_network
+  glutton-job:
+    build:
+      context: glutton
+      dockerfile: Dockerfile.glutton
+      args:
+        BASE_DIR: "."
+    depends_on:
+      - jobmanager
+      - taskmanager
+      - kafka1
+      - kafka2
+      - kafka3
+      - orientdb
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka1:19092,kafka2:19093,kafka3:19094
+      - KAFKA_TOPIC_INGESTION=kg-ingestion
+      - ORIENTDB_URL=http://orientdb:2480
+      - ORIENTDB_DB=genkg
+      - ORIENTDB_USER=root
+      - ORIENTDB_PASSWORD=root
+      - JOB_MANAGER_RPC_ADDRESS=jobmanager
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+    volumes:
+      - ./test_data:/opt/flink/test_data
+    networks:
+      - genkg_network
+
+volumes:
+  kafka1-data:
+  kafka2-data:
+  kafka3-data:
+  orientdb_data:
+
+networks:
+  genkg_network:
+    driver: bridge

@@ -5,7 +5,7 @@
 ### Steps to Deploy
 
 1. **Package Glutton job** from the `glutton` directory. Refer to the [README.md](https://github.com/siddiqskm/genkg/tree/main/glutton) for details.
-2. **Build the **``** and **``** services** using the following command:
+2. **Build the `genkg` and `glutton` services** using the following command:
    ```sh
    docker-compose build --no-cache
    ```
@@ -23,13 +23,12 @@
    ```
 5. **Create a genkg database** by accessing OrientDB at:
    - [OrientDB Studio](http://localhost:2480/studio/index.html#/)
-6. **Restart the **``genkg and glutton-job``** services** to start using the created topic and database.
-   ```sh
-   docker-compose restart genkg glutton-job
-   ```
+6. **Restart the `genkg` and `glutton-job` services** to start using the created topic and database.
 7. **Access the FastAPI service docs** at:
    - [FastAPI Docs](http://localhost:8000/docs#/default/create_knowledge_graph_api_v1_kg_post)
-8. **Trigger knowledge graph creation** using the following JSON payload:
+8. **Create a directory named `test_data`** in the base directory and place the dataset here.
+   - Movielens dataset can be downloaded from this link: [Movielens 32M](https://files.grouplens.org/datasets/movielens/ml-32m-README.html)
+9. **Trigger knowledge graph creation** using the following JSON payload:
    ```json
    {
      "source": {

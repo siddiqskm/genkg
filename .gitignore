@@ -182,3 +182,6 @@ glutton/data/
 logs/
 notebooks/
 flink/
+.settings/
+.classpath
+.project

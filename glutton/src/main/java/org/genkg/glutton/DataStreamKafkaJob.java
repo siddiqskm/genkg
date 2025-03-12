@@ -45,6 +45,7 @@ public class DataStreamKafkaJob {
     public String name;
     public String file_pattern;
     public List<ColumnConfig> columns;
+    public boolean distinct; // CHANGE #1: Added distinct field
   }
 
   public static class EdgeConfig {
@@ -53,7 +54,12 @@ public class DataStreamKafkaJob {
     public String to_vertex;
     public String file_pattern;
     public List<ColumnConfig> properties;
-    public Object mapping;
+    public MappingConfig mapping;
+  }
+
+  public static class MappingConfig {
+    public String from_key;
+    public String to_key;
   }
 
   public static class ETLConfig {
@@ -63,29 +69,66 @@ public class DataStreamKafkaJob {
     public List<EdgeConfig> edges;
   }
 
-  public static class CsvRecord {
-    public String tableName;
-    public Map<String, String> data;
+  public static class GraphRecord {
+    public enum RecordType {
+      VERTEX,
+      EDGE
+    }
 
-    public CsvRecord(String tableName, Map<String, String> data) {
-      this.tableName = tableName;
-      this.data = data;
+    public RecordType type;
+    public String className;
+    public Map<String, Object> properties;
+    public String fromVertex;
+    public String toVertex;
+    public String fromKeyName; // Column name for from vertex
+    public String toKeyName; // Column name for to vertex
+    public Object fromKeyValue; // Actual value for from vertex
+    public Object toKeyValue; // Actual value for to vertex
+
+    // Constructor for Vertex
+    public GraphRecord(String className, Map<String, Object> properties) {
+      this.type = RecordType.VERTEX;
+      this.className = className;
+      this.properties = properties;
+    }
+
+    // Constructor for Edge
+    public GraphRecord(
+        String className,
+        String fromVertex,
+        String toVertex,
+        String fromKeyName,
+        String toKeyName,
+        Map<String, Object> properties) {
+      this.type = RecordType.EDGE;
+      this.className = className;
+      this.fromVertex = fromVertex;
+      this.toVertex = toVertex;
+      this.fromKeyName = fromKeyName;
+      this.toKeyName = toKeyName;
+      this.properties = properties;
+
+      // Extract actual values from properties
+      this.fromKeyValue = properties.get(fromKeyName);
+      this.toKeyValue = properties.get(toKeyName);
     }
   }
 
-  // CSV File Processor
-  public static class CsvFileProcessor extends ProcessFunction<ETLConfig, CsvRecord> {
+  // Graph Data Processor
+  public static class GraphDataProcessor extends ProcessFunction<ETLConfig, GraphRecord> {
     private transient MapState<String, Boolean> processedFiles;
+    private transient Map<String, Set<String>> distinctVertices;
 
     @Override
     public void open(Configuration parameters) throws Exception {
       processedFiles =
           getRuntimeContext()
               .getMapState(new MapStateDescriptor<>("processedFiles", String.class, Boolean.class));
+      distinctVertices = new HashMap<>();
     }
 
     @Override
-    public void processElement(ETLConfig config, Context ctx, Collector<CsvRecord> out)
+    public void processElement(ETLConfig config, Context ctx, Collector<GraphRecord> out)
         throws Exception {
       if (config == null || config.source == null || config.source.path == null) {
         LOG.error("Invalid config or missing path");
@@ -101,91 +144,296 @@ public class DataStreamKafkaJob {
         return;
       }
 
-      // Get all CSV files in the directory
-      File[] csvFiles = directory.listFiles((dir, name) -> name.toLowerCase().endsWith(".csv"));
-      if (csvFiles == null || csvFiles.length == 0) {
-        LOG.warn("No CSV files found in directory: {}", basePath);
+      // Process each file according to the vertices and edges definitions
+      processVertices(config, directory, out);
+      processEdges(config, directory, out);
+    }
+
+    private void processVertices(ETLConfig config, File directory, Collector<GraphRecord> out)
+        throws Exception {
+      if (config.vertices == null || config.vertices.isEmpty()) {
+        LOG.warn("No vertices defined in config");
         return;
       }
 
-      // Process each CSV file
-      for (File csvFile : csvFiles) {
-        String filePath = csvFile.getAbsolutePath();
+      for (VertexConfig vertexConfig : config.vertices) {
+        String filePattern = vertexConfig.file_pattern;
+        File[] matchingFiles = directory.listFiles((dir, name) -> name.equals(filePattern));
 
-        // Skip if already processed to prevent duplicate processing
-        if (processedFiles.contains(filePath)) {
-          LOG.debug("Skipping already processed file: {}", filePath);
+        if (matchingFiles == null || matchingFiles.length == 0) {
+          LOG.warn(
+              "No files matching pattern '{}' found for vertex '{}'",
+              filePattern,
+              vertexConfig.name);
           continue;
         }
 
-        LOG.info("Processing CSV file: {}", csvFile.getName());
+        for (File file : matchingFiles) {
+          String filePath = file.getAbsolutePath();
+          String fileKey = vertexConfig.name + ":" + filePath;
 
-        // Table name is the file name without .csv extension
-        String tableName = csvFile.getName().substring(0, csvFile.getName().lastIndexOf('.'));
-
-        try (java.io.BufferedReader reader =
-            java.nio.file.Files.newBufferedReader(csvFile.toPath())) {
-          // Read header line
-          String headerLine = reader.readLine();
-          if (headerLine == null) {
-            LOG.warn("Empty CSV file: {}", csvFile.getName());
+          // Skip if already processed to prevent duplicate processing
+          if (processedFiles.contains(fileKey)) {
+            LOG.debug(
+                "Skipping already processed file for vertex {}: {}", vertexConfig.name, filePath);
             continue;
           }
 
-          // Parse header
-          String[] headers = headerLine.split(",");
+          LOG.info("Processing file for vertex {}: {}", vertexConfig.name, file.getName());
 
-          // Process data rows line by line instead of storing all lines in memory
-          String line;
-          int lineNumber = 1;
-          while ((line = reader.readLine()) != null) {
-            lineNumber++;
-            if (line.trim().isEmpty()) {
+          try (java.io.BufferedReader reader =
+              java.nio.file.Files.newBufferedReader(file.toPath())) {
+            // Read header line
+            String headerLine = reader.readLine();
+            if (headerLine == null) {
+              LOG.warn("Empty file: {}", file.getName());
               continue;
             }
 
-            String[] values = line.split(",");
-            if (values.length != headers.length) {
-              LOG.warn(
-                  "Column count mismatch in file {} line {}: expected {} got {}",
-                  csvFile.getName(),
-                  lineNumber,
-                  headers.length,
-                  values.length);
-              continue;
+            // Parse header
+            String[] headers = headerLine.split(",");
+
+            // Initialize distinct tracking for this vertex if needed
+            if (vertexConfig.distinct && !distinctVertices.containsKey(vertexConfig.name)) {
+              distinctVertices.put(vertexConfig.name, new HashSet<>());
             }
 
-            // Create data map
-            Map<String, String> data = new HashMap<>();
-            for (int j = 0; j < headers.length; j++) {
-              // Extra check to prevent array index issues
-              data.put(headers[j].trim(), j < values.length ? values[j].trim() : "");
-            }
+            // Process data rows
+            String line;
+            int lineNumber = 1;
+            while ((line = reader.readLine()) != null) {
+              lineNumber++;
+              if (line.trim().isEmpty()) {
+                continue;
+              }
 
-            // Emit record
-            out.collect(new CsvRecord(tableName, data));
+              String[] values = line.split(",");
+              if (values.length != headers.length) {
+                LOG.warn(
+                    "Column count mismatch in file {} line {}: expected {} got {}",
+                    file.getName(),
+                    lineNumber,
+                    headers.length,
+                    values.length);
+                continue;
+              }
+
+              // Create properties map for the vertex
+              Map<String, Object> properties = new HashMap<>();
+              String vertexKey = null;
+
+              // Extract properties from columns defined in vertex config
+              for (ColumnConfig column : vertexConfig.columns) {
+                int columnIdx = getColumnIndex(headers, column.name);
+                if (columnIdx >= 0 && columnIdx < values.length) {
+                  Object value = convertValue(values[columnIdx].trim(), column.type);
+                  properties.put(column.name, value);
+
+                  // Track the key column for distinct checking
+                  if (column.is_key) {
+                    vertexKey = column.name + ":" + values[columnIdx].trim();
+                  }
+                }
+              }
+
+              // Skip if distinct is required and vertex already exists
+              if (vertexConfig.distinct && vertexKey != null) {
+                Set<String> keys = distinctVertices.get(vertexConfig.name);
+                if (keys.contains(vertexKey)) {
+                  continue;
+                }
+                keys.add(vertexKey);
+              }
+
+              // Emit vertex record
+              out.collect(new GraphRecord(vertexConfig.name, properties));
+            }
+          } catch (Exception e) {
+            LOG.error(
+                "Error processing file {} for vertex {}: {}",
+                file.getName(),
+                vertexConfig.name,
+                e.getMessage());
           }
-          // Proper exception handling for file processing errors
-        } catch (Exception e) {
-          LOG.error("Error processing CSV file {}: {}", csvFile.getName(), e.getMessage());
+
+          processedFiles.put(fileKey, true);
+          LOG.info(
+              "Successfully processed file for vertex {}: {}", vertexConfig.name, file.getName());
+        }
+      }
+    }
+
+    private void processEdges(ETLConfig config, File directory, Collector<GraphRecord> out)
+        throws Exception {
+      if (config.edges == null || config.edges.isEmpty()) {
+        LOG.warn("No edges defined in config");
+        return;
+      }
+
+      for (EdgeConfig edgeConfig : config.edges) {
+        String filePattern = edgeConfig.file_pattern;
+        File[] matchingFiles = directory.listFiles((dir, name) -> name.equals(filePattern));
+
+        if (matchingFiles == null || matchingFiles.length == 0) {
+          LOG.warn(
+              "No files matching pattern '{}' found for edge '{}'", filePattern, edgeConfig.name);
+          continue;
         }
 
-        processedFiles.put(filePath, true);
-        LOG.info("Successfully processed and marked file: {}", filePath);
+        for (File file : matchingFiles) {
+          String filePath = file.getAbsolutePath();
+          String fileKey = edgeConfig.name + ":" + filePath;
+
+          // Skip if already processed to prevent duplicate processing
+          if (processedFiles.contains(fileKey)) {
+            LOG.debug("Skipping already processed file for edge {}: {}", edgeConfig.name, filePath);
+            continue;
+          }
+
+          LOG.info("Processing file for edge {}: {}", edgeConfig.name, file.getName());
+
+          try (java.io.BufferedReader reader =
+              java.nio.file.Files.newBufferedReader(file.toPath())) {
+            // Read header line
+            String headerLine = reader.readLine();
+            if (headerLine == null) {
+              LOG.warn("Empty file: {}", file.getName());
+              continue;
+            }
+
+            // Parse header
+            String[] headers = headerLine.split(",");
+
+            // Process data rows
+            String line;
+            int lineNumber = 1;
+            while ((line = reader.readLine()) != null) {
+              lineNumber++;
+              if (line.trim().isEmpty()) {
+                continue;
+              }
+
+              String[] values = line.split(",");
+              if (values.length != headers.length) {
+                LOG.warn(
+                    "Column count mismatch in file {} line {}: expected {} got {}",
+                    file.getName(),
+                    lineNumber,
+                    headers.length,
+                    values.length);
+                continue;
+              }
+
+              // Get mapping values - here's the fix
+              int fromKeyIdx = getColumnIndex(headers, edgeConfig.mapping.from_key);
+              int toKeyIdx = getColumnIndex(headers, edgeConfig.mapping.to_key);
+
+              if (fromKeyIdx < 0
+                  || toKeyIdx < 0
+                  || fromKeyIdx >= values.length
+                  || toKeyIdx >= values.length) {
+                LOG.warn("Mapping keys not found or out of bounds in line {}", lineNumber);
+                continue;
+              }
+
+              // Store both the column names and the actual values
+              String fromKeyName = edgeConfig.mapping.from_key;
+              String toKeyName = edgeConfig.mapping.to_key;
+              Object fromIdValue = values[fromKeyIdx].trim();
+              Object toIdValue = values[toKeyIdx].trim();
+
+              // Create properties map for the edge
+              Map<String, Object> properties = new HashMap<>();
+
+              // Add the key values to properties for later reference
+              properties.put(fromKeyName, fromIdValue);
+              properties.put(toKeyName, toIdValue);
+
+              // Extract properties from edge properties configuration
+              if (edgeConfig.properties != null) {
+                for (ColumnConfig property : edgeConfig.properties) {
+                  int propIdx = getColumnIndex(headers, property.name);
+                  if (propIdx >= 0 && propIdx < values.length) {
+                    Object value = convertValue(values[propIdx].trim(), property.type);
+                    properties.put(property.name, value);
+                  }
+                }
+              }
+
+              // Emit edge record with both column names and values
+              out.collect(
+                  new GraphRecord(
+                      edgeConfig.name,
+                      edgeConfig.from_vertex,
+                      edgeConfig.to_vertex,
+                      fromKeyName,
+                      toKeyName,
+                      properties));
+            }
+          } catch (Exception e) {
+            LOG.error(
+                "Error processing file {} for edge {}: {}",
+                file.getName(),
+                edgeConfig.name,
+                e.getMessage());
+          }
+
+          processedFiles.put(fileKey, true);
+          LOG.info("Successfully processed file for edge {}: {}", edgeConfig.name, file.getName());
+        }
+      }
+    }
+
+    private int getColumnIndex(String[] headers, String columnName) {
+      for (int i = 0; i < headers.length; i++) {
+        if (headers[i].trim().equals(columnName)) {
+          return i;
+        }
+      }
+      LOG.warn("Column '{}' not found in headers", columnName);
+      return -1;
+    }
+
+    private Object convertValue(String value, String type) {
+      if (value == null || value.isEmpty()) {
+        return null;
+      }
+
+      try {
+        switch (type.toLowerCase()) {
+          case "integer":
+          case "int":
+            return Integer.parseInt(value);
+          case "long":
+            return Long.parseLong(value);
+          case "float":
+            return Float.parseFloat(value);
+          case "double":
+            return Double.parseDouble(value);
+          case "boolean":
+            return Boolean.parseBoolean(value);
+          case "string":
+          default:
+            return value;
+        }
+      } catch (NumberFormatException e) {
+        LOG.warn("Failed to convert value '{}' to type {}: {}", value, type, e.getMessage());
+        return value; // Return as string if conversion fails
       }
     }
   }
 
   // OrientDB Sink
-  public static class OrientDBSink implements Sink<CsvRecord> {
+  public static class OrientDBSink implements Sink<GraphRecord> {
     @Override
-    public SinkWriter<CsvRecord> createWriter(Sink.InitContext context) throws IOException {
+    public SinkWriter<GraphRecord> createWriter(Sink.InitContext context) throws IOException {
       return new OrientDBWriter();
     }
 
-    private static class OrientDBWriter implements SinkWriter<CsvRecord> {
+    private static class OrientDBWriter implements SinkWriter<GraphRecord> {
       private transient OrientDB client;
       private transient ODatabaseSession session;
+      private final Map<String, Map<Object, String>> vertexRidCache = new HashMap<>();
 
       private void initializeIfNeeded() {
         if (client == null) {
@@ -230,41 +478,256 @@ public class DataStreamKafkaJob {
           LOG.info(
               "Connecting to OrientDB at: {}, database: {}", orientdbConnectionString, orientdbDb);
 
-          client = new OrientDB(orientdbConnectionString, OrientDBConfig.defaultConfig());
-          session = client.open(orientdbDb, orientdbUser, orientdbPassword);
+          // Implement connection retry logic
+          int maxRetries = 5;
+          int retryCount = 0;
+          int retryDelayMs = 5000; // 5 seconds initial delay
+          boolean connected = false;
+
+          while (!connected && retryCount < maxRetries) {
+            try {
+              if (retryCount > 0) {
+                LOG.info(
+                    "Retry attempt {} connecting to OrientDB at {}",
+                    retryCount,
+                    orientdbConnectionString);
+              }
+
+              client = new OrientDB(orientdbConnectionString, OrientDBConfig.defaultConfig());
+              session = client.open(orientdbDb, orientdbUser, orientdbPassword);
+              connected = true;
+              LOG.info("Successfully connected to OrientDB");
+            } catch (Exception e) {
+              retryCount++;
+              if (retryCount >= maxRetries) {
+                LOG.error(
+                    "Failed to connect to OrientDB after {} attempts: {}",
+                    maxRetries,
+                    e.getMessage());
+                throw e;
+              } else {
+                LOG.warn(
+                    "Connection attempt {} failed: {}. Retrying in {} ms...",
+                    retryCount,
+                    e.getMessage(),
+                    retryDelayMs);
+                try {
+                  Thread.sleep(retryDelayMs);
+                  // Exponential backoff for next retry
+                  retryDelayMs *= 2;
+                } catch (InterruptedException ie) {
+                  Thread.currentThread().interrupt();
+                  throw new RuntimeException("Interrupted during connection retry", ie);
+                }
+              }
+            }
+          }
         }
       }
 
       @Override
-      public void write(CsvRecord record, Context context)
+      public void write(GraphRecord record, Context context)
           throws IOException, InterruptedException {
         try {
           initializeIfNeeded();
 
-          if (record == null || record.tableName == null || record.data == null) {
-            LOG.warn("Invalid record received");
+          if (record == null) {
+            LOG.warn("Null record received");
             return;
           }
 
-          // Create SQL INSERT statement
+          if (record.type == GraphRecord.RecordType.VERTEX) {
+            writeVertex(record);
+          } else if (record.type == GraphRecord.RecordType.EDGE) {
+            writeEdge(record);
+          }
+        } catch (Exception e) {
+          LOG.error("Error writing to OrientDB: {}", e.getMessage(), e);
+          throw new IOException("Failed to write to OrientDB", e);
+        }
+      }
+
+      private void writeVertex(GraphRecord record) {
+        try {
+          // Check if vertex class exists, create if not
+          if (!session.getMetadata().getSchema().existsClass(record.className)) {
+            String createClassSQL = "CREATE CLASS " + record.className + " EXTENDS V";
+            LOG.info("Executing SQL: {}", createClassSQL);
+            session.command(createClassSQL).close();
+            LOG.info("Created vertex class: {}", record.className);
+          }
+
+          // Build vertex insert SQL
           StringBuilder sql = new StringBuilder();
-          sql.append("INSERT INTO ").append(record.tableName).append(" SET ");
+          sql.append("CREATE VERTEX ").append(record.className).append(" SET ");
 
           List<String> assignments = new ArrayList<>();
-          for (Map.Entry<String, String> entry : record.data.entrySet()) {
-            String value = escapeSqlValue(entry.getValue());
-            assignments.add(String.format("%s = '%s'", entry.getKey(), value));
+          Object keyValue = null;
+          String keyProperty = null;
+
+          for (Map.Entry<String, Object> entry : record.properties.entrySet()) {
+            String property = entry.getKey();
+            Object value = entry.getValue();
+
+            // Find the key property if any
+            for (Map.Entry<String, Object> propEntry : record.properties.entrySet()) {
+              if (propEntry.getKey().toLowerCase().contains("id")) {
+                keyProperty = propEntry.getKey();
+                keyValue = propEntry.getValue();
+                break;
+              }
+            }
+
+            if (value != null) {
+              assignments.add(String.format("%s = %s", property, formatSqlValue(value)));
+            }
           }
 
           sql.append(String.join(", ", assignments));
 
-          // Execute the query
-          session.command(sql.toString()).stream().close();
-          LOG.info("Inserted record into table {}", record.tableName);
+          // Execute the query and get the RID
+          LOG.info("Executing SQL: {}", sql.toString());
+          try {
+            // Execute the query and get the RID
+            var result = session.command(sql.toString()).next();
+            Object ridObj = result.getProperty("@rid");
+            String vertexRid = ridObj.toString();
+            LOG.debug("Inserted vertex {} with RID {}", record.className, vertexRid);
 
+            // Cache the RID if we have a key value
+            if (keyValue != null && keyProperty != null) {
+              if (!vertexRidCache.containsKey(record.className)) {
+                vertexRidCache.put(record.className, new HashMap<>());
+              }
+              vertexRidCache.get(record.className).put(keyValue, vertexRid);
+              LOG.debug(
+                  "Cached RID for {} with key {}:{}", record.className, keyProperty, keyValue);
+            }
+          } catch (Exception e) {
+            LOG.error("Error getting RID after vertex creation: {}", e.getMessage(), e);
+          }
         } catch (Exception e) {
-          LOG.error("Error writing to OrientDB: {}", e.getMessage(), e);
-          throw new IOException("Failed to write to OrientDB", e);
+          LOG.error("Error creating vertex {}: {}", record.className, e.getMessage(), e);
+        }
+      }
+
+      private void writeEdge(GraphRecord record) {
+        try {
+          // Check if edge class exists, create if not
+          if (!session.getMetadata().getSchema().existsClass(record.className)) {
+            String createClassSQL = "CREATE CLASS " + record.className + " EXTENDS E";
+            LOG.info("Executing SQL: {}", createClassSQL);
+            session.command(createClassSQL).close();
+            LOG.info("Created edge class: {}", record.className);
+          }
+
+          // Get the actual column names and values
+          String fromKeyColumn = record.fromKeyName;
+          String toKeyColumn = record.toKeyName;
+          Object fromIdValue = record.fromKeyValue;
+          Object toIdValue = record.toKeyValue;
+
+          if (fromIdValue == null || toIdValue == null) {
+            LOG.warn(
+                "Missing key values for edge {}: fromKey={}, toKey={}",
+                record.className,
+                fromKeyColumn,
+                toKeyColumn);
+            return;
+          }
+
+          // Direct queries using the exact keys from the mapping configuration
+          String findFromSQL =
+              String.format(
+                  "SELECT @rid FROM %s WHERE %s = %s",
+                  record.fromVertex, fromKeyColumn, formatSqlValue(fromIdValue));
+
+          String findToSQL =
+              String.format(
+                  "SELECT @rid FROM %s WHERE %s = %s",
+                  record.toVertex, toKeyColumn, formatSqlValue(toIdValue));
+
+          LOG.info("Finding from vertex: {}", findFromSQL);
+          var fromResult = session.command(findFromSQL);
+
+          LOG.info("Finding to vertex: {}", findToSQL);
+          var toResult = session.command(findToSQL);
+
+          String fromRid = null;
+          String toRid = null;
+
+          if (fromResult.hasNext()) {
+            fromRid = fromResult.next().getProperty("@rid").toString();
+            fromResult.close();
+          } else {
+            fromResult.close();
+            LOG.warn(
+                "From vertex not found: {}.{} = {}", record.fromVertex, fromKeyColumn, fromIdValue);
+            return;
+          }
+
+          if (toResult.hasNext()) {
+            toRid = toResult.next().getProperty("@rid").toString();
+            toResult.close();
+          } else {
+            toResult.close();
+            LOG.warn("To vertex not found: {}.{} = {}", record.toVertex, toKeyColumn, toIdValue);
+            return;
+          }
+
+          // Build edge creation SQL
+          StringBuilder sql = new StringBuilder();
+          sql.append("CREATE EDGE ")
+              .append(record.className)
+              .append(" FROM ")
+              .append(fromRid)
+              .append(" TO ")
+              .append(toRid);
+
+          if (record.properties != null && !record.properties.isEmpty()) {
+            sql.append(" SET ");
+            List<String> assignments = new ArrayList<>();
+
+            for (Map.Entry<String, Object> entry : record.properties.entrySet()) {
+              String property = entry.getKey();
+              Object value = entry.getValue();
+
+              // Skip the key fields since they're used for edge relationships
+              if (!property.equals(fromKeyColumn)
+                  && !property.equals(toKeyColumn)
+                  && value != null) {
+                assignments.add(String.format("%s = %s", property, formatSqlValue(value)));
+              }
+            }
+
+            if (!assignments.isEmpty()) {
+              sql.append(String.join(", ", assignments));
+            } else {
+              // Remove the SET clause if no properties
+              sql.delete(sql.length() - 4, sql.length());
+            }
+          }
+
+          // Execute the query
+          LOG.info("Executing SQL: {}", sql.toString());
+          session.command(sql.toString()).close();
+          LOG.debug("Created edge {} from {} to {}", record.className, fromRid, toRid);
+        } catch (Exception e) {
+          LOG.error("Error creating edge {}: {}", record.className, e.getMessage(), e);
+        }
+      }
+
+      private String formatSqlValue(Object value) {
+        if (value == null) {
+          return "null";
+        }
+
+        if (value instanceof String) {
+          return "'" + escapeSqlValue((String) value) + "'";
+        } else if (value instanceof Number || value instanceof Boolean) {
+          return value.toString();
+        } else {
+          return "'" + escapeSqlValue(value.toString()) + "'";
         }
       }
 
@@ -375,16 +838,14 @@ public class DataStreamKafkaJob {
                 })
             .filter(Objects::nonNull);
 
-    // Process CSV files and load to OrientDB
-    // configStream.process(new CsvFileProcessor()).sinkTo(new
-    // OrientDBSink()).name("OrientDB-Sink");
+    // Process data and load to OrientDB
     configStream
         .keyBy(
             config -> config.kg_id != null ? config.kg_id : "default") // Key by knowledge graph ID
-        .process(new CsvFileProcessor())
+        .process(new GraphDataProcessor())
         .sinkTo(new OrientDBSink())
         .name("OrientDB-Sink");
 
-    env.execute("CSV to OrientDB Import Job");
+    env.execute("Graph Data Import Job");
   }
 }

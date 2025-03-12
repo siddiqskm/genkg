@@ -20,6 +20,7 @@ class VertexConfig(BaseModel):
     name: str
     file_pattern: str
     columns: List[ColumnConfig]
+    distinct: Optional[bool] = False
 
 
 class EdgePropertyConfig(BaseModel):

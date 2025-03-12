@@ -146,6 +146,11 @@ under the License.
         <artifactId>orientdb-core</artifactId>
         <version>3.2.11</version>
     </dependency>
+		<dependency>
+				<groupId>com.opencsv</groupId>
+				<artifactId>opencsv</artifactId>
+				<version>5.7.1</version>
+		</dependency>
 	</dependencies>
 
 	<build>

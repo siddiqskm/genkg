@@ -3,7 +3,7 @@ from fastapi import FastAPI
 
 from app.api.routes import router
 from app.core.config import get_settings
-from genkg.app.utils.db_helpers import setup_schema_mapper
+from genkg.app.utils.orientdb_helper import setup_schema_mapper
 
 settings = get_settings()
 

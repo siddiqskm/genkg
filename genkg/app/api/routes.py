@@ -19,10 +19,10 @@ from app.models.response import (
     HealthResponse
 )
 from app.core.config import get_settings
-from genkg.app.utils.db_helpers import (
+from genkg.app.utils.orientdb_helper import (
     create_schema_in_orientdb_if_needed
 )
-from genkg.app.utils.kafka_helpers import publish_ingestion_config
+from genkg.app.utils.kafka_helper import publish_ingestion_config
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -142,7 +142,7 @@ async def get_kg_metadata(kg_id: str):
         logger.error(f"Error retrieving metadata: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/kg/{kg_id}/recommendations", response_model=RecommendationResponse)
+@router.get("/kg/{kg_id}/recommendations", response_model=RecommendationResponse)
 async def get_recommendations(kg_id: str, request: RecommendationRequest):
     """
     Get recommendations based on graph traversal

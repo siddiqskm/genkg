@@ -17,32 +17,48 @@ async def generate_orientdb_schema_commands(request: KGCreateRequest) -> List[st
     """Generate OrientDB schema creation commands from request"""
     commands = []
 
+    # Map input types to OrientDB types
+    def map_to_orientdb_type(input_type: str) -> str:
+        type_map = {
+            "integer": "INTEGER",
+            "int": "INTEGER",
+            "long": "LONG",
+            "float": "FLOAT",
+            "double": "DOUBLE",
+            "string": "STRING",
+            "boolean": "BOOLEAN"
+        }
+        return type_map.get(input_type.lower(), "STRING")
+
     # Create vertex classes
     for vertex in request.vertices:
-        commands.append(f"create class {vertex.name} extends v")
+        commands.append(f"CREATE CLASS {vertex.name} EXTENDS V")
 
         # Create properties for vertex
         for column in vertex.columns:
+            orientdb_type = map_to_orientdb_type(column.type)
             commands.append(
-                f"create property {vertex.name}.{column.name} {column.type.lower()}"
+                f"CREATE PROPERTY {vertex.name}.{column.name} {orientdb_type}"
             )
 
         # Create index if column is key
         for column in vertex.columns:
             if column.is_key:
                 commands.append(
-                    f"create index {vertex.name}.{column.name} on {vertex.name} ({column.name}) unique_hash_index"
+                    f"CREATE INDEX {vertex.name}.{column.name} ON {vertex.name} ({column.name}) UNIQUE_HASH_INDEX"
                 )
 
     # Create edge classes
     for edge in request.edges:
-        commands.append(f"create class {edge.name} extends e")
+        commands.append(f"CREATE CLASS {edge.name} EXTENDS E")
 
         # Create properties for edge
         for prop in edge.properties:
+            orientdb_type = map_to_orientdb_type(prop.type)
             commands.append(
-                f"create property {edge.name}.{prop.name} {prop.type.lower()}"
+                f"CREATE PROPERTY {edge.name}.{prop.name} {orientdb_type}"
             )
+
     logger.debug(f"Schema commands generated: {commands}")
     return commands
 

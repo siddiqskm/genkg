@@ -92,6 +92,7 @@ class OrientDBRestClient:
         :param command: SQL command to execute
         :return: Command results
         """
+        logger.debug("Executing command in OrientDB: %s", command)
         try:
             url = self._make_database_url("sql")
             response = self.client.post(

@@ -26,3 +26,14 @@ def parse_iso_datetime(date_str: Optional[str]) -> Optional[datetime]:
         # Fallback to now if parsing fails
         logger.error("Issue converting ISO datetime string: {date_str}")
         return None
+
+
+def calculate_similarity_score(recommendation):
+    """Calculate similarity score based on interactions"""
+    # Example scoring logic - customize based on your requirements
+    # More in_rated connections could indicate higher popularity
+    rated_count = len(recommendation.get("in_rated", []))
+    max_rated = 100  # Hypothetical maximum
+    # Normalize to 0-1 range
+    score = min(rated_count / max_rated, 1.0)
+    return round(score, 2)

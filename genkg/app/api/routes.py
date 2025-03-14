@@ -1,34 +1,31 @@
 import json
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Query
-import uuid
 import logging
 from datetime import datetime
 
 from app.models.request import (
     KGCreateRequest,
-    RecommendationRequest,
-    PathRequest,
-    PropertyQueryRequest
+    SimpleQueryRequest
 )
 from app.models.response import (
     KGCreateResponse,
     KGDeleteResponse,
     KGStatusResponse,
-    KGMetadataResponse,
-    RecommendationResponse,
-    PathResponse,
-    PropertyQueryResponse,
-    HealthResponse
+    PathRecommendationResponse,
+    HealthResponse,
+    SimpleQueryResponse,
+    UserSimilarityRecommendationResponse
 )
 from app.core.config import get_redis_client, get_settings
 from genkg.app.utils.flink_helper import check_flink_connection
-from genkg.app.utils.misc import parse_iso_datetime
+from genkg.app.utils.misc import calculate_similarity_score, parse_iso_datetime
 from genkg.app.utils.orientdb_helper import (
     check_orientdb_connection,
     cleanup_orientdb_resources,
     create_schema_in_orientdb_if_needed
 )
 from genkg.app.utils.kafka_helper import check_kafka_connection, publish_ingestion_config
+from genkg.app.utils.orientdb_repository import OrientDBRepository
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -149,7 +146,6 @@ async def list_knowledge_graphs(
                 request_data = {}
                 if "request" in job_data:
                     request_data = json.loads(job_data["request"])
-
                 # Build response (matching structure from get_knowledge_graph)
                 kg_status = {
                     "kg_id": kg_id,
@@ -163,7 +159,6 @@ async def list_knowledge_graphs(
                     "source_type": request_data.get("source", {}).get("type") if request_data else None,
                     "source_path": request_data.get("source", {}).get("path") if request_data else None
                 }
-
                 result.append(kg_status)
         return result
     except Exception as e:
@@ -171,89 +166,121 @@ async def list_knowledge_graphs(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/kg/{kg_id}/recommendations", response_model=RecommendationResponse)
-async def get_recommendations(kg_id: str, request: RecommendationRequest):
+@router.get("/recommendations/similar-to-user", response_model=UserSimilarityRecommendationResponse)
+async def get_similar_to_user_recommendations(
+    kg_id: str = Query(..., description="Knowledge graph ID"),
+    user_id: str = Query(..., description="User ID for whom to generate recommendations"),
+    limit: int = Query(10, description="Number of recommendations to return"),
+    settings = Depends(get_settings)
+):
     """
-    Get recommendations based on graph traversal
-    """
-    try:
-        return {
-            "recommendations": [
-                {
-                    "vertex_id": "v1",
-                    "vertex_type": "movie",
-                    "properties": {},
-                    "score": 0.95,
-                    "path": [
-                        {
-                            "vertex_id": "v2",
-                            "edge_type": "rated"
-                        }
-                    ]
-                }
-            ]
-        }
-    except Exception as e:
-        logger.error(f"Error getting recommendations: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/kg/{kg_id}/path", response_model=PathResponse)
-async def find_paths(kg_id: str, request: PathRequest):
-    """
-    Find paths between vertices in the graph
+    Get recommendations based on similar users' preferences
     """
     try:
-        return {
-            "paths": [
-                {
-                    "length": 2,
-                    "vertices": [
-                        {
-                            "id": "v1",
-                            "type": "user",
-                            "properties": {}
-                        }
-                    ],
-                    "edges": [
-                        {
-                            "type": "rated",
-                            "properties": {}
-                        }
-                    ]
-                }
-            ]
-        }
+        # Get recommendations from repository
+        recommendations = await OrientDBRepository.get_similar_user_recommendations(
+            user_id=user_id,
+            limit=limit,
+            settings=settings
+        )
+        # Format the recommendations according to required structure
+        formatted_recommendations = []
+        for rec in recommendations:
+            # Extract metadata fields
+            metadata = {
+                "@rid": rec.get("@rid", ""),
+                "@version": rec.get("@version", 0),
+                "@class": rec.get("@class", ""),
+                "@fieldTypes": rec.get("@fieldTypes", "")
+            }
+            # Dynamically extract property fields
+            properties = {}
+            in_data = {}
+            out_data = {}
+            # Process all fields in the record
+            for key, value in rec.items():
+                # Skip metadata fields
+                if key.startswith('@'):
+                    continue
+                # Categorize fields based on prefix
+                if key.startswith('in_'):
+                    in_data[key] = value
+                elif key.startswith('out_'):
+                    out_data[key] = value
+                else:
+                    # All other fields are properties
+                    properties[key] = value
+            # Create recommendation item
+            item = {
+                "metadata": metadata,
+                "properties": properties,
+                "in_marked": in_data,
+                "out_marked": out_data,
+                "similarity_score": calculate_similarity_score(rec)
+            }
+            formatted_recommendations.append(item)
+        # Create response
+        return UserSimilarityRecommendationResponse(
+            recommendations=formatted_recommendations,
+            metadata={
+                "total_count": len(formatted_recommendations),
+                "user_id": user_id
+            }
+        )
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error finding paths: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Similar-to-user recommendation failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 
-@router.post("/kg/{kg_id}/query", response_model=PropertyQueryResponse)
-async def query_properties(kg_id: str, request: PropertyQueryRequest):
+@router.get("/recommendations/similar-to-user/path", response_model=PathRecommendationResponse)
+async def get_path_recommendations(
+    kg_id: str = Query(..., description="Knowledge graph ID"),
+    user_id: str = Query(..., description="User ID for whom to generate recommendations"),
+    limit: int = Query(10, description="Number of recommendations to return"),
+    max_depth: int = Query(5, description="Maximum path depth for traversal"),
+    settings = Depends(get_settings)
+):
     """
-    Query vertices based on property filters
+    Get path-based recommendations based on user similarity navigation paths
     """
     try:
-        return {
-            "vertices": [
-                {
-                    "id": "v1",
-                    "properties": {},
-                    "connected_edges": [
-                        {
-                            "type": "rated",
-                            "direction": "out",
-                            "count": 5
-                        }
-                    ]
-                }
-            ],
-            "total_count": 1
-        }
+        # Get path-based recommendations from repository
+        recommendations = await OrientDBRepository.get_path_recommendations(
+            user_id=user_id,
+            limit=limit,
+            max_depth=max_depth,
+            settings=settings
+        )
+        # Format the recommendations exactly as returned by OrientDB
+        formatted_recommendations = []
+        for rec in recommendations:
+            formatted_recommendations.append({
+                "vertex_id": rec.get("vertex_id", ""),
+                "vertex_type": rec.get("vertex_type", ""),
+                "score": rec.get("score", 0),
+                "path": rec.get("path", [])
+            })
+        return PathRecommendationResponse(
+            recommendations=formatted_recommendations,
+            metadata={
+                "total_count": len(formatted_recommendations),
+                "user_id": user_id,
+                "max_depth": max_depth
+            }
+        )
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error querying properties: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Path-based recommendation failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 
 @router.delete("/kg/{kg_id}", response_model=KGDeleteResponse)
@@ -301,6 +328,34 @@ async def delete_knowledge_graph(
         raise
     except Exception as e:
         logger.error(f"Error deleting knowledge graph: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/kg/{kg_id}/query", response_model=SimpleQueryResponse)
+async def query_class(
+    kg_id: str,
+    request: SimpleQueryRequest,
+    settings = Depends(get_settings)
+):
+    """
+    Query vertices or edges by class name with pagination
+    """
+    try:
+        result = await OrientDBRepository.query_class(
+            kg_id=kg_id,
+            class_name=request.class_name,
+            limit=request.limit,
+            offset=request.offset,
+            settings=settings
+        )
+        return SimpleQueryResponse(
+            results=result["results"],
+            total_count=result["total_count"]
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error querying class: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -1,7 +1,8 @@
 from datetime import datetime
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, validator, Field
 
 
 class KGCreateResponse(BaseModel):
@@ -120,3 +121,40 @@ class KGDeleteResponse(BaseModel):
     kg_id: str
     status: str
     message: str
+
+
+class RecommendationMetadata(BaseModel):
+    rid: str = Field(..., alias="@rid")
+    version: int = Field(..., alias="@version")
+    class_name: str = Field(..., alias="@class")
+    field_types: Optional[str] = Field(None, alias="@fieldTypes")
+
+
+class RecommendationItem(BaseModel):
+    metadata: Dict[str, Any]
+    properties: Dict[str, Any]
+    in_marked: Dict[str, Any]
+    out_marked: Dict[str, Any]
+    similarity_score: float
+
+
+class UserSimilarityRecommendationResponse(BaseModel):
+    recommendations: List[RecommendationItem]
+    metadata: Dict[str, Any]
+
+
+class PathRecommendationItem(BaseModel):
+    vertex_id: str
+    vertex_type: str
+    score: float
+    path: List[str]
+
+
+class PathRecommendationResponse(BaseModel):
+    recommendations: List[PathRecommendationItem]
+    metadata: Dict[str, Any]
+
+
+class SimpleQueryResponse(BaseModel):
+    results: List[Dict[str, Any]]
+    total_count: int

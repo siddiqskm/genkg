@@ -1,6 +1,6 @@
 import logging
 import uuid
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import httpx
 from fastapi import HTTPException
@@ -191,3 +191,73 @@ def record_schema_creation(client: OrientDBRestClient, path: str, kg_id: str):
     except Exception as e:
         logger.error(f"Failed to record schema creation: {str(e)}")
         raise
+
+
+async def cleanup_orientdb_resources(kg_id: str, request_data: dict, settings: Settings):
+    """
+    Clean up all OrientDB resources associated with a knowledge graph
+
+    :param kg_id: Knowledge graph ID
+    :param request_data: The original request data used to create the graph
+    :param settings: Application settings
+    """
+    client = None
+    try:
+        client = OrientDBRestClient(settings)
+
+        # Delete SchemaMapper vertex for this kg_id
+        mapper_delete_query = f"DELETE VERTEX SchemaMapper WHERE kg_id = '{kg_id}'"
+        client.execute_command(mapper_delete_query)
+
+        # Delete all vertices and edges for this graph
+        if request_data and "vertices" in request_data:
+            for vertex in request_data["vertices"]:
+                vertex_name = vertex.get("name", "")
+                if vertex_name:
+                    delete_vertex_query = f"DELETE VERTEX {vertex_name}"
+                    client.execute_command(delete_vertex_query)
+
+        if request_data and "edges" in request_data:
+            for edge in request_data["edges"]:
+                edge_name = edge.get("name", "")
+                if edge_name:
+                    delete_edge_query = f"DELETE EDGE {edge_name}"
+                    client.execute_command(delete_edge_query)
+
+        # Drop all classes for this graph
+        if request_data and "vertices" in request_data:
+            for vertex in request_data["vertices"]:
+                vertex_name = vertex.get("name", "")
+                if vertex_name:
+                    drop_class_query = f"DROP CLASS {vertex_name}"
+                    client.execute_command(drop_class_query)
+
+        if request_data and "edges" in request_data:
+            for edge in request_data["edges"]:
+                edge_name = edge.get("name", "")
+                if edge_name:
+                    drop_class_query = f"DROP CLASS {edge_name}"
+                    client.execute_command(drop_class_query)
+    finally:
+        if client:
+            client.close()
+
+
+async def check_orientdb_connection(settings: Settings) -> Tuple[bool, Optional[str]]:
+    """
+    Check OrientDB connection health
+
+    :param settings: Application settings
+    :return: Tuple of (is_healthy, error_message)
+    """
+    client = None
+    try:
+        client = OrientDBRestClient(settings)
+        # Simple query to test connection
+        client.execute_command("SELECT COUNT(*) FROM V LIMIT 1")
+        return True, None
+    except Exception as e:
+        return False, str(e)
+    finally:
+        if client:
+            client.close()

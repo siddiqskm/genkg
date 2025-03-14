@@ -1,6 +1,8 @@
 from pydantic_settings import BaseSettings
+from fastapi import Depends
 from typing import Optional
 from functools import lru_cache
+import redis
 import logging
 import sys
 import os
@@ -30,6 +32,14 @@ class Settings(BaseSettings):
     LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     LOG_FILE_SIZE: int = 10 * 1024 * 1024  # 10MB
     LOG_FILE_COUNT: int = 5
+
+    # Redis Related
+    REDIS_HOST: str = "redis"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
+
+    # FLINK RELATED
+    FLINK_URL: str = "http://jobmanager:8081"
 
     class Config:
         env_file = ".env"
@@ -90,3 +100,12 @@ def get_settings() -> Settings:
     Get cached settings instance
     """
     return Settings()
+
+
+def get_redis_client(settings = Depends(get_settings)):
+    return redis.Redis(
+        host=settings.REDIS_HOST,
+        port=settings.REDIS_PORT,
+        db=settings.REDIS_DB,
+        decode_responses=True
+    )

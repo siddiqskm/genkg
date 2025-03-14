@@ -6,6 +6,7 @@ import com.orientechnologies.orient.core.db.OrientDB;
 import com.orientechnologies.orient.core.db.OrientDBConfig;
 import java.io.File;
 import java.io.IOException;
+import java.time.Instant;
 import java.util.*;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.MapFunction;
@@ -23,10 +24,16 @@ import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import redis.clients.jedis.Jedis;
+import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.JedisPoolConfig;
 
 public class DataStreamKafkaJob {
   private static final Logger LOG = LoggerFactory.getLogger(DataStreamKafkaJob.class);
   private static final ObjectMapper mapper = new ObjectMapper();
+  private static JedisPool jedisPool;
+  private static volatile boolean redisInitialized = false;
+  private static final ThreadLocal<String> currentKgId = new ThreadLocal<>();
 
   // Config Classes
   public static class SourceConfig {
@@ -135,18 +142,38 @@ public class DataStreamKafkaJob {
         return;
       }
 
+      currentKgId.set(config.kg_id);
+
       String basePath = config.source.path;
       LOG.info("Processing files from path: {}", basePath);
 
       File directory = new File(basePath);
       if (!directory.exists() || !directory.isDirectory()) {
         LOG.error("Directory does not exist: {}", basePath);
+        try {
+          updateJobStatus(config.kg_id, "FAILED", "Directory does not exist: " + basePath);
+        } catch (Exception e) {
+          LOG.error("Error updating Redis failure status: {}", e.getMessage());
+        }
         return;
       }
 
-      // Process each file according to the vertices and edges definitions
-      processVertices(config, directory, out);
-      processEdges(config, directory, out);
+      try {
+        // Process each file according to the vertices and edges definitions
+        processVertices(config, directory, out);
+        processEdges(config, directory, out);
+
+        // Update Redis status to SUCCESS
+        updateJobStatus(config.kg_id, "SUCCESS", null);
+      } catch (Exception e) {
+        LOG.error("Error processing data: {}", e.getMessage());
+        try {
+          updateJobStatus(config.kg_id, "FAILED", e.getMessage());
+        } catch (Exception ex) {
+          LOG.error("Error updating Redis failure status: {}", ex.getMessage());
+        }
+        throw e;
+      }
     }
 
     private void processVertices(ETLConfig config, File directory, Collector<GraphRecord> out)
@@ -543,6 +570,12 @@ public class DataStreamKafkaJob {
           }
         } catch (Exception e) {
           LOG.error("Error writing to OrientDB: {}", e.getMessage(), e);
+          try {
+            updateJobStatus(
+                currentKgId.get(), "FAILED", "Error writing to OrientDB: " + e.getMessage());
+          } catch (Exception ex) {
+            LOG.error("Error updating Redis failure status: {}", ex.getMessage());
+          }
           throw new IOException("Failed to write to OrientDB", e);
         }
       }
@@ -765,7 +798,64 @@ public class DataStreamKafkaJob {
     }
   }
 
+  // Connection provider that ensures Redis is available in each task
+  private static synchronized JedisPool getRedisConnection() {
+    if (!redisInitialized) {
+      try {
+        String redisHost = System.getenv().getOrDefault("REDIS_HOST", "redis");
+        int redisPort = Integer.parseInt(System.getenv().getOrDefault("REDIS_PORT", "6379"));
+        int redisDb = Integer.parseInt(System.getenv().getOrDefault("REDIS_DB", "0"));
+
+        LOG.info("TASK-LEVEL REDIS INIT: {}:{} DB {}", redisHost, redisPort, redisDb);
+
+        JedisPoolConfig poolConfig = new JedisPoolConfig();
+        poolConfig.setMaxTotal(10);
+        poolConfig.setMaxIdle(5);
+
+        jedisPool = new JedisPool(poolConfig, redisHost, redisPort);
+
+        // Test connection
+        try (Jedis jedis = jedisPool.getResource()) {
+          String pingResponse = jedis.ping();
+          LOG.info("TASK-LEVEL REDIS TEST: {}", pingResponse);
+        }
+
+        redisInitialized = true;
+      } catch (Exception e) {
+        LOG.error("TASK-LEVEL REDIS INIT FAILED: {}", e.getMessage());
+        jedisPool = null;
+      }
+    }
+    return jedisPool;
+  }
+
+  private static void updateJobStatus(String kgId, String status, String errorMessage) {
+    if (kgId == null) return;
+
+    JedisPool pool = getRedisConnection();
+    if (pool == null) {
+      LOG.error("Cannot update job status: Redis connection failed");
+      return;
+    }
+
+    try (Jedis jedis = pool.getResource()) {
+      String jobKey = "job:" + kgId;
+      jedis.hset(jobKey, "status", status);
+      jedis.hset(jobKey, "updated_at", Instant.now().toString());
+
+      if (errorMessage != null && !errorMessage.isEmpty()) {
+        jedis.hset(jobKey, "error", errorMessage);
+      }
+
+      LOG.info("Set job status to {} for kg_id: {}", status, kgId);
+    } catch (Exception e) {
+      LOG.error("Error updating Redis status: {}", e.getMessage(), e);
+    }
+  }
+
   public static void main(String[] args) throws Exception {
+    System.err.println("STARTING APPLICATION");
+
     final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
     // Do not restart the job upon failures
@@ -829,7 +919,15 @@ public class DataStreamKafkaJob {
                   @Override
                   public ETLConfig map(String value) throws Exception {
                     try {
-                      return mapper.readValue(value, ETLConfig.class);
+                      LOG.info("INCOMING PAYLOAD: {}", value);
+                      ETLConfig config = mapper.readValue(value, ETLConfig.class);
+                      try {
+                        String configJson = mapper.writeValueAsString(config);
+                        LOG.info("PARSED CONFIG: {}", configJson);
+                      } catch (Exception e) {
+                        LOG.error("Error serializing config for logging: {}", e.getMessage());
+                      }
+                      return config;
                     } catch (Exception e) {
                       LOG.error("Error parsing JSON payload: {}", e.getMessage(), e);
                       return null;
@@ -837,6 +935,29 @@ public class DataStreamKafkaJob {
                   }
                 })
             .filter(Objects::nonNull);
+
+    // Update status to PROCESSING when message is received
+    configStream =
+        configStream.map(
+            new MapFunction<ETLConfig, ETLConfig>() {
+              @Override
+              public ETLConfig map(ETLConfig config) throws Exception {
+                if (config != null && config.kg_id != null) {
+                  // Use the updateJobStatus method
+                  updateJobStatus(config.kg_id, "PROCESSING", null);
+
+                  // Add extra timestamp information
+                  JedisPool pool = getRedisConnection();
+                  if (pool != null) {
+                    try (Jedis jedis = pool.getResource()) {
+                      String jobKey = "job:" + config.kg_id;
+                      jedis.hset(jobKey, "processing_started", Instant.now().toString());
+                    }
+                  }
+                }
+                return config;
+              }
+            });
 
     // Process data and load to OrientDB
     configStream

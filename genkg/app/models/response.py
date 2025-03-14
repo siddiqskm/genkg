@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 
 
 class KGCreateResponse(BaseModel):
@@ -12,9 +12,21 @@ class KGCreateResponse(BaseModel):
 class KGStatusResponse(BaseModel):
     kg_id: str
     status: str
-    created_at: datetime
-    updated_at: datetime
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    processing_started: Optional[datetime] = None
     error: Optional[str] = None
+    vertices_count: Optional[int] = 0
+    edges_count: Optional[int] = 0
+    source_type: Optional[str] = None
+    source_path: Optional[str] = None
+
+    # Just handle tuples that might come from Redis parsing
+    @validator('created_at', 'updated_at', 'processing_started')
+    def validate_datetime(cls, v):
+        if isinstance(v, tuple) and len(v) > 0 and isinstance(v[0], datetime):
+            return v[0]
+        return v
 
 
 class VertexMetadata(BaseModel):
@@ -98,6 +110,13 @@ class ComponentStatus(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    status: str
-    components: ComponentStatus
+    status: str  # healthy, degraded, unhealthy
+    components: Dict[str, bool]
+    errors: Optional[List[str]] = None
     timestamp: datetime
+
+
+class KGDeleteResponse(BaseModel):
+    kg_id: str
+    status: str
+    message: str

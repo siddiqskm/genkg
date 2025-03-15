@@ -30,7 +30,8 @@ class OrientDBRestClient:
             headers={
                 'Content-Type': 'application/json',
                 'Accept': 'application/json'
-            }
+            },
+            timeout=30.0
         )
     
     def _make_database_url(self, endpoint: str) -> str:

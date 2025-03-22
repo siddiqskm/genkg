@@ -1,6 +1,6 @@
 # genkg
 
-## Generic Recommendation Engine As a Service
+## Knowledge Graph-Based Generic Recommendation Engine As a Service
 
 ### Steps to Deploy
 
